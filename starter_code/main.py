@@ -1,42 +1,33 @@
+# Start from the last coding stage of the previous LLM evals project
 import json
 import os
 import sys
 import uuid
-from datetime import datetime, timedelta
 
 import dotenv
 from langchain_community.docstore.document import Document
-from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.prompts import MessagesPlaceholder, ChatPromptTemplate
-from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage, trim_messages
+from langchain_core.prompts import MessagesPlaceholder, ChatPromptTemplate, PromptTemplate
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from langchain_redis import RedisChatMessageHistory
-from langfuse import Langfuse
-from langfuse.langchain import CallbackHandler
-from langfuse import observe, get_client, propagate_attributes
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams
-from langchain_core.messages import trim_messages
+from langfuse import observe, propagate_attributes, get_client
+from langfuse.langchain import CallbackHandler
 from nemoguardrails import RailsConfig
 from nemoguardrails.integrations.langchain.runnable_rails import RunnableRails
-from langchain_core.globals import set_debug
-import logging
-
-logging.getLogger("nemoguardrails").setLevel(logging.ERROR)
-logging.getLogger("nemoguardrails.actions").setLevel(logging.ERROR)
-logging.getLogger("nemoguardrails.colang").setLevel(logging.ERROR)
-logging.getLogger("opentelemetry.context").setLevel(logging.CRITICAL)
-
 
 # Load environment variables from .env file
 dotenv.load_dotenv()
-session_name = f"session-{uuid.uuid4().hex[:8]}"
-user_id = "HyperUser"
-total_user_budget = 0.0010000
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6380/0")
 
+# Generate unique session_id and user_id once
+session_id = f"session-{uuid.uuid4().hex[:8]}"
+users = ["James", "George", "Mike", "Sherlock"]
+user_id = users[uuid.uuid4().int % len(users)]
+
+# Initialize the LLM with OpenAI API credentials (substitute for other models)
 llm = ChatOpenAI(
     model=os.getenv("OPENAI_MODEL"),
     base_url=os.getenv("OPENAI_BASE_URL"),
@@ -45,39 +36,34 @@ llm = ChatOpenAI(
 
 # Initialize the embeddings model with OpenAI API credentials
 embeddings_model = OpenAIEmbeddings(
-    model="text-embedding-ada-002",
+    model=os.getenv("OPENAI_EMBEDDINGS_MODEL"),
     base_url=os.getenv("OPENAI_BASE_URL"),
     api_key=os.getenv("OPENAI_API_KEY"),
-    show_progress_bar=True,
+    show_progress_bar=True
 )
 
-langfuse_handler = CallbackHandler()
-langfuse_client = get_client()
+# Redis configuration
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6380/0")
 
-config = RailsConfig.from_path("./config")
-guardrails = RunnableRails(config, input_key="user_input")
-
-def check_budget(current_usage: float) -> bool:
-    if current_usage < total_user_budget:
-        return True
-    else:
-        return False
+# Initialize Langfuse client
+langfuse = get_client()
 
 
 # ---------------------------
 # Load JSON Data and Build Qdrant Vector Store
 # ---------------------------
+
+@observe(name="embed_documents")
 def embed_documents(json_path: str):
     """
-    Load JSON data from the specified file and convert each entry to a Document.
+    Load JSON data from the smartphones.json file and convert each entry to a Document.
     :param
         json_path (str): Path to the JSON file containing smartphone data.
 
     :returns
-        Chroma: A Chroma vector store built from the smartphone documents,
+        Qdrant vector store A Qdrant vector store built from the smartphone documents,
                 or an empty list if an error occurs.
     """
-
     try:
         with open(json_path, "r") as f:
             data = json.load(f)
@@ -148,19 +134,23 @@ def embed_documents(json_path: str):
         return []
 
 
+# Initialize the vector store
+product_db = embed_documents("datasets/smartphones.json")
+
+
 # ---------------------------
 # Tool Definitions
 # ---------------------------
 @tool("SmartphoneInfo")
 def smartphone_info_tool(model: str) -> str:
     """
-    Retrieve information about a smartphone model from the product database.
+    Retrieves information about a smartphone model from the product database.
 
     :param
         model (str): The smartphone model to search for.
 
     :returns
-        str: A summary of the smartphone's specifications, price, and availability,
+        str: The smartphone's specifications, price, and availability,
              or an error message if not found or if an error occurs.
     """
     try:
@@ -171,212 +161,239 @@ def smartphone_info_tool(model: str) -> str:
         info = results[0].page_content
         return info
     except Exception as e:
-        print(f"Error during smartphone information retrieval for model {model}: {e}")
-        return f"Error during smartphone information retrieval: {e}"
-
-
-@tool("EndSession")
-def end_session_tool(session_status: str):
-    """
-    Ends the current session and outputs a goodbye message when the user
-    expresses gratitude, or it is clear they would like to end the
-    current conversation
-
-    :param
-        session_status (str): Status message indicating the end of session
-        Should always be "exit"
-
-    :returns
-        Exits the system after printing the goodbye message.
-    """
-    langfuse_goodbye_prompt = langfuse_client.get_prompt("goodbye_system_prompt")
-    langchain_goodbye_prompt = ChatPromptTemplate.from_messages(
-        langfuse_goodbye_prompt.get_langchain_prompt(),
-    )
-
-    langchain_goodbye_prompt.metadata = {"langfuse_prompt": langfuse_goodbye_prompt}
-
-    try:
-
-        goodbye_chain = langchain_goodbye_prompt | llm
-        goodbye_message = goodbye_chain.invoke({"user_id": user_id},
-                                               config={"callbacks": [langfuse_handler], "run_name": "goodbye"})
-
-        return goodbye_message
-    except Exception as e:
-        return "Thank you for visiting. Goodbye!"
+        return f"Error during smartphone information retrieval for model {model}: {e}"
 
 
 # ---------------------------
 # Tool Call Handling and Response Generation
 # ---------------------------
-def generate_context(llm_tools):
+@observe(name="generate_context")
+def generate_context(ai_message: AIMessage, conversation: list) -> dict:
     """
-    Process tool calls from the language model and collect their responses.
+    Process tool calls from the language model and collect their responses as ToolMessage objects.
 
     :param
-        llm_with_tools: The language model instance with bound tools.
+        ai_message (AIMessage): The language model's output message containing tool_calls.
+        conversation (list): The current conversation history (in-memory for this turn).
 
     :returns
-        Toolresponse
+        A dictionary containing a list of ToolMessage objects under the key "tool_responses".
     """
+    # construct the conversation history with the AI message containing tool calls
+    conversation.append(ai_message)
 
-    # Process each tool call based on its name
-    for tool_call in llm_tools.tool_calls:
-        if tool_call["name"] == "SmartphoneInfo":
-            tool_response = smartphone_info_tool.invoke(tool_call).content
-            return tool_response
-        elif tool_call["name"] == "EndSession":
-            tool_response = end_session_tool.invoke(tool_call).content
-            return tool_response
-    return ""
+    # Check if the AI message has any tool calls
+    if not hasattr(ai_message, "tool_calls") or not ai_message.tool_calls:
+        conversation.append(
+            AIMessage(
+                content="No tool calls found. Please ensure the model is configured to use tools."
+            )
+        )
 
-def budget_exceeded():
-    print("Unfortunately, you've exceeded your current usage. Please try again later.")
-    end_session_tool.invoke({"session_status": "exit"})
-    sys.exit(0)
+    try:
+        # Process each tool call, invoke the appropriate tool, and append the result to the conversation
+        # a message with tool calls is expected to be followed by tool responses
+        for tool_call in ai_message.tool_calls:
+            if tool_call["name"] == "SmartphoneInfo":
+                tool_output = smartphone_info_tool.invoke(tool_call)
+                conversation.append(tool_output)
+
+    except Exception as e:
+        print(f"An error occurred while processing tool calls: {e}")
+        conversation.append(
+            AIMessage(
+                content=f"An error occurred while processing tool calls: {e}"
+            )
+        )
 
 
 # ---------------------------
 # Main Conversation Loop
 # ---------------------------
 def main():
-
-    langfuse = get_client()
-
     # List of available tools
-    tools = [smartphone_info_tool, end_session_tool]
+    tools = [smartphone_info_tool]
 
     # Bind the tools to the language model instance
     llm_with_tools = llm.bind_tools(tools)
 
-    def get_redis_history(session_id: str) -> BaseChatMessageHistory:
-        return RedisChatMessageHistory(session_id, redis_url=REDIS_URL, ttl=120)
+    # Fetch prompts from Langfuse
+    context_lf_prompt = langfuse.get_prompt("context_system_prompt")
+    review_lf_prompt = langfuse.get_prompt("review_system_prompt")
+    goodbye_lf_prompt = langfuse.get_prompt("goodbye_system_prompt")
 
+    # Create LangChain prompts from Langfuse prompts
+    # Extract the first message (system message) and add MessagesPlaceholder for conversation history
+    context_prompt = ChatPromptTemplate.from_messages([
+        context_lf_prompt.get_langchain_prompt()[0],
+        MessagesPlaceholder(variable_name="conversation"),
+    ])
+    context_prompt.metadata = {"langfuse_prompt": context_lf_prompt}
+
+    review_prompt = ChatPromptTemplate.from_messages([
+        review_lf_prompt.get_langchain_prompt()[0],
+        MessagesPlaceholder(variable_name="conversation"),
+    ])
+    review_prompt.metadata = {"langfuse_prompt": review_lf_prompt}
+
+    # For goodbye_prompt, extract the content from the first message
+    goodbye_prompt = PromptTemplate.from_template(
+        goodbye_lf_prompt.get_langchain_prompt()[0][1]
+    )
+    goodbye_prompt.metadata = {"langfuse_prompt": goodbye_lf_prompt}
+
+    # Create message trimmer for context chain to limit token usage
     trimmer = trim_messages(
-        strategy="last",
-        token_counter=llm,
-        max_tokens=1000,
-        start_on="human",
-        end_on=("human", "tool"),
-        include_system=True,
+        strategy="last",  # Keep the most recent messages
+        token_counter=llm,  # Use LLM to count tokens
+        max_tokens=500,  # Maximum tokens for conversation history
+        start_on="human",  # Start trimmed history with a human message
+        end_on=("human", "tool"),  # End on human or tool message
+        include_system=True,  # Always include system message
     )
 
-    langfuse_context_prompt = langfuse_client.get_prompt("context_system_prompt", label="production")
-    langchain_context_prompt = ChatPromptTemplate.from_messages(
-        [
-            langfuse_context_prompt.get_langchain_prompt()[0],
-            MessagesPlaceholder(variable_name="chat_history"),
-            langfuse_context_prompt.get_langchain_prompt()[1]
-        ]
+    # Build chains (trimmer only on context_chain to manage tool call context)
+    context_chain = context_prompt | trimmer | llm_with_tools
+    review_chain = review_prompt | llm
+    goodbye_chain = goodbye_prompt | llm
+
+    # Load NeMo Guardrails configuration
+    guardrails_config = RailsConfig.from_path("config/")
+
+    # Create guardrails instance for input validation only
+    # We'll use it separately to validate user input before the chain
+    input_rails = RunnableRails(guardrails_config, input_key="user_input")
+
+    # Initialize the Langfuse handler once for the entire conversation
+    langfuse_handler = CallbackHandler()
+
+    # Initialize Redis chat history with TTL (1 hour = 3600 seconds)
+    redis_history = RedisChatMessageHistory(
+        session_id=session_id,
+        redis_url=REDIS_URL,
+        ttl=3600  # Messages expire after 1 hour
     )
-
-    langchain_context_prompt.metadata = {"langfuse_prompt": langfuse_context_prompt}
-
-    context_chain = langchain_context_prompt | trimmer | llm_with_tools | generate_context
-    context_chain_with_history = RunnableWithMessageHistory(
-        context_chain, get_redis_history, input_messages_key="user_input", history_messages_key="chat_history"
-    )
-
-    context_chain_with_history_and_rails = guardrails | context_chain_with_history
-
-    langfuse_review_prompt = langfuse_client.get_prompt("review_system_prompt")
-    langchain_review_prompt = ChatPromptTemplate.from_messages(
-        [
-            langfuse_review_prompt.get_langchain_prompt()[0],
-            MessagesPlaceholder(variable_name="chat_history"),
-            langfuse_review_prompt.get_langchain_prompt()[1]
-        ]
-    )
-
-    langchain_review_prompt.metadata = {"langfuse_prompt": langfuse_review_prompt}
-
-    review_chain = langchain_review_prompt | llm
-    review_chain_with_history = RunnableWithMessageHistory(
-        review_chain, get_redis_history, input_messages_key="user_input", history_messages_key="chat_history"
-    )
-
-    initial_cost = 0.0
-
-    end_time = datetime.now()
-    start_time = end_time - timedelta(minutes=1)
-
-    traces_response = langfuse_client.api.trace.list(user_id="hyper-user")
-    traces = traces_response.data if hasattr(traces_response, 'data') else traces_response
-
-    for trace in traces:
-        current_trace = langfuse_client.api.trace.get(trace.id)
-        cost = current_trace.total_cost if hasattr(current_trace, 'total_cost') and current_trace.total_cost else 0.0
-        initial_cost += cost
-
-    if not check_budget(initial_cost):
-        print("Unfortunately, you've exceeded your current usage. Please try again later.")
-        end_session_tool.invoke({"session_status": "exit"})
-
-    current_cost = initial_cost
 
     try:
         print("Welcome to the Smartphone Assistant! I can help you with smartphone features and comparisons.")
-
         while True:
-            if check_budget(current_cost):
-                user_input = input("User: ").strip()
-
-                # Check for exit commands before processing through guardrails
-                if user_input.lower() in ["exit", "quit", "bye", "goodbye", "thank you", "thanks"]:
+            user_input = input("User: ").strip()
+            if user_input.lower() in ["exit", "quit", "bye", "end"]:
+                # Create a parent span for the goodbye message
+                with langfuse.start_as_current_observation(
+                    as_type="span",
+                    name="user-query",
+                    input={"user_input": user_input}
+                ) as span:
                     with propagate_attributes(
-                        session_id=session_name,
+                        session_id=session_id,
                         user_id=user_id
                     ):
-                        goodbye_response = end_session_tool.invoke({"session_status": "exit"})
-                        print(f"System: {goodbye_response.content}")
-                    break
+                        goodbye_message = goodbye_chain.invoke(
+                            {"user_id": user_id},
+                            config={
+                                "run_name": "goodbye-message",
+                                "callbacks": [langfuse_handler]
+                            }
+                        )
 
-                # Use propagate_attributes to apply session_id and user_id to chain invocations
+                        # Set the output on the parent span
+                        span.update(output={"response": goodbye_message.content})
+
+                print(f"System: {goodbye_message.content}")
+
+                # Collect user feedback about the entire conversation
+                feedback = input("\nWas this conversation helpful? (Yes/No): ").strip()
+                user_comment = input("Please give us a reason for your answer. This will help us improve: ").strip()
+
+                # Score at the session level (not individual trace)
+                langfuse.create_score(
+                    session_id=session_id,  # Use the session_id from the start of the conversation
+                    name="conversation_usefulness",
+                    value=feedback,
+                    data_type="CATEGORICAL",
+                    comment=user_comment
+                )
+
+                print("\nThank you for your feedback!")
+                break
+
+            # Load conversation history from Redis
+            conversation = list(redis_history.messages)
+
+            # Create user message
+            user_message = HumanMessage(user_input)
+            # Add to in-memory conversation for this turn
+            conversation.append(user_message)
+
+            # Create a parent span for this user query to group all chain invocations
+            with langfuse.start_as_current_observation(
+                as_type="span",
+                name="user-query",
+                input={"user_input": user_input}
+            ) as span:
+                # Propagate trace attributes to all child observations
                 with propagate_attributes(
-                    session_id=session_name,
+                    session_id=session_id,
                     user_id=user_id
                 ):
-                    context = context_chain_with_history_and_rails.invoke(
+                    # First, validate input with guardrails (only passes user_input, not conversation)
+                    validation_result = input_rails.invoke(
                         {"user_input": user_input},
                         config={
-                            "configurable": {"session_id": user_id},
-                            "callbacks": [langfuse_handler], "run_name": "context"
+                            "run_name": "input-validation",
+                            "callbacks": [langfuse_handler]
                         }
                     )
 
-                    context_result = context.get("output") if isinstance(context, dict) else context
-                    if context_result and context_result.strip().lower() == "i'm sorry, i can't respond to that.":
-                        print(f"System: {context_result}")
-                    else:
-                        final_response = review_chain_with_history.invoke(
-                            {"user_input": user_input, "user_id": user_id, "context": context},
-                            config={
-                                "configurable": {"session_id": user_id},
-                                "callbacks": [langfuse_handler], "run_name": "final_response"
-                            }
-                        )
-                        print(f"System: {final_response.content}")
+                    # Check if input rail was triggered
+                    # NeMo Guardrails adds metadata to the AIMessage when a rail is triggered
+                    rail_triggered = isinstance(validation_result, AIMessage) and validation_result.response_metadata.get("rails_triggered", False)
 
-                # Use the v4 API to get the latest trace
-                latest_traces = langfuse_client.api.trace.list(limit=1)
-                if hasattr(latest_traces, 'data') and len(latest_traces.data) > 0:
-                    trace_id = latest_traces.data[0].id
-                    current_trace = langfuse_client.api.trace.get(trace_id)
-                    trace_cost = current_trace.total_cost if hasattr(current_trace, 'total_cost') and current_trace.total_cost else 0.0
-                    current_cost += trace_cost
-                print(f"Your usage so far: {current_cost}")
+                    if rail_triggered:
+                        # Rail triggered - skip further processing
+                        print(f"[NeMo Guardrails] Input BLOCKED: {validation_result.content}")
+                        span.update(output={"response": validation_result.content, "rail_triggered": True})
+                        print(f"System: {validation_result.content}")
+                        continue  # Skip saving to Redis and proceed to next input
 
-            else:
-                budget_exceeded()
-    except KeyboardInterrupt:
-        end_session_tool.invoke({"session_status": "exit"})
-        sys.exit(0)
+                    # Rail not triggered - continue with normal processing
+                    print(f"[NeMo Guardrails] Input ALLOWED: Validation passed")
+                    # Context chain invocation (with trimmer to limit tokens)
+                    ai_with_tools = context_chain.invoke(
+                        {"user_input": user_input, "conversation": conversation},
+                        config={
+                            "run_name": "context",
+                            "callbacks": [langfuse_handler]
+                        }
+                    )
+
+                    # Process tool calls and add results to in-memory conversation
+                    generate_context(ai_with_tools, conversation)
+
+                    # Final response chain invocation
+                    response = review_chain.invoke(
+                        {"user_id": user_id, "user_input": user_input, "conversation": conversation},
+                        config={
+                            "run_name": "final-response",
+                            "callbacks": [langfuse_handler]
+                        }
+                    )
+
+                # Set the output on the parent span
+                span.update(output={"response": response.content})
+
+            print(f"System: {response.content}")
+
+            # Save ONLY clean messages to Redis (user input and final AI response)
+            # Tool calls and intermediate messages are NOT saved
+            redis_history.add_message(user_message)
+            redis_history.add_message(response)
+
     except Exception as e:
         print(f"An unexpected error occurred in the main loop: {e}")
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    product_db = embed_documents("smartphones.json")
     main()
