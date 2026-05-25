@@ -20,7 +20,7 @@ Here, we will run the application on an AWS EC2 instance. In that instance, we w
 
 To complete this task, you need an AWS account. Once you have an account, here are some security and other best practices to perform next:
 
-- Set up a [zero-spend budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budget-templates.html). This ensures that you’re immediately alerted in case you left some services running. (but it doesn’t stop services; you have to do that yourself)
+- Set up a [zero-spend budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budget-templates.html). This ensures that you're immediately alerted in case you left some services running (but it doesn't stop services; you have to do that yourself).
 - Never use the root user account. Head over to AWS IAM service console and set up an IAM user with the `AdministratorAccess` policy. You will use this account for administrative actions.
 - Set up MFA for the root user. This can also be done from the AWS IAM service console.
 - You can also set up other users with minimal permissions for various tasks.
@@ -44,10 +44,10 @@ docker push <repo>/<image>:<tag>
 
 ### Using EC2 Instances
 
-Once your image is uploaded, the next step is to launch an AWS EC2 instance where you’ll run the container. Here are some key configs for the instance:
+Once your image is uploaded, the next step is to launch an AWS EC2 instance where you'll run the container. Here are some key configurations for the instance:
 
 - Use a Linux-based image such as Ubuntu, Debian, or Amazon Linux.
-- For instance, type, select a free-tier eligible instance type, which can be `t2.micro` or `t3.micro`, depending on the selected region.
+- For instance type, select a free-tier eligible instance type, which can be `t2.micro` or `t3.micro`, depending on the selected region.
 - Create a new key pair — you’ll use this to `SSH` into the instance.
 - For Network settings, check options to enable SSH, HTTPS, and HTTP traffic for the new security group. This will allow you to connect to the server via SSH and access the app via HTTP.
 - You can leave the other options as default.
@@ -62,7 +62,7 @@ Once you connect to the instance, you need to install and run the Docker Engine.
 
 ```bash
 sudo groupadd docker # create a new group (it may already exist)
-sudo usermod -aG docker $USER # and the currently logged in user to the group
+sudo usermod -aG docker $USER # add the currently logged in user to the group
 newgrp docker # to activate changes but you may need to restart the VM if you still can't run docker without sudo
 ```
 
@@ -78,7 +78,7 @@ docker run \
   <image_name> # e.g. public.ecr.aws/q9c7y1p3/deployment:latest
 ```
 
-This command starts your container in the background (using `-d`), maps port 80 on the host to port 8000 in the container (`-p 80:8000`), and gives it the name `hypersite` (`--name hypersite`).  `--restart always` sets the restart policy to `always`, so Docker will automatically restart the container if it crashes or if the daemon restarts, and loads environment variables from the file `./.env` (`--env-file ./.env`). The <image_name> is your container registry image.
+This command starts your container in the background (using `-d`), maps port 80 on the host to port 8000 in the container (`-p 80:8000`), and gives it the name `hypersite` (`--name hypersite`). `--restart always` sets the restart policy to `always`, so Docker will automatically restart the container if it crashes or if the daemon restarts, and loads environment variables from the file `./.env` (`--env-file ./.env`). The <image_name> is your container registry image.
 
 That’s it! The application should now be accessible via the public IP from anywhere in the world. You can try viewing the API docs here:
 
@@ -104,11 +104,11 @@ An Application Load Balancer (ALB) distributes incoming traffic across multiple 
 
 2. **Serverless with AWS Lambda and API Gateway**
 
-Your FastAPI application is packaged into a special format (using a tool like Mangum) and deployed as an AWS Lambda function. An API Gateway endpoint is created to trigger the function via HTTP requests. This approach is fully managed (no servers to patch or maintain), pay-per-use pricing, automatic scaling. Very useful for APIs with infrequent or unpredictable traffic, or for teams that want to minimize infrastructure management.
+Your FastAPI application is packaged into a special format (using a tool like Mangum) and deployed as an AWS Lambda function. An API Gateway endpoint is created to trigger the function via HTTP requests. This approach is fully managed (no servers to patch or maintain), has pay-per-use pricing, and automatic scaling. Very useful for APIs with infrequent or unpredictable traffic, or for teams that want to minimize infrastructure management.
 
 3. **Container Orchestration with ECS or EKS**
 
-Use a container orchestrator like   Amazon ECS   (Elastic Container Service) or   EKS   (Elastic Kubernetes Service) to manage your container deployments. With   AWS ****Fargate   as a launch type for ECS, you don't even need to manage the underlying EC2 instances.
+Use a container orchestrator like Amazon ECS (Elastic Container Service) or EKS (Elastic Kubernetes Service) to manage your container deployments. With AWS Fargate as a launch type for ECS, you don't even need to manage the underlying EC2 instances.
 
 This approach is the most robust and flexible option. It manages deployments, scaling, service discovery, and container health automatically. It is useful for complex applications, microservices architectures, and high-traffic environments that require robust, automated operational control.
 
