@@ -5,7 +5,7 @@ import sys
 import uuid
 
 import dotenv
-from langchain_community.docstore.document import Document
+from langchain_core.documents import Document
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage, trim_messages
 from langchain_core.prompts import MessagesPlaceholder, ChatPromptTemplate, PromptTemplate
 from langchain_core.tools import tool
@@ -168,13 +168,14 @@ def smartphone_info_tool(model: str) -> str:
 # Tool Call Handling and Response Generation
 # ---------------------------
 @observe(name="generate_context")
-def generate_context(ai_message: AIMessage, conversation: list) -> dict:
+def generate_context(ai_message: AIMessage, conversation: list, config: dict = None) -> dict:
     """
     Process tool calls from the language model and collect their responses as ToolMessage objects.
 
     :param
         ai_message (AIMessage): The language model's output message containing tool_calls.
         conversation (list): The current conversation history (in-memory for this turn).
+        config (dict): Optional configuration dictionary containing callbacks for tracing.
 
     :returns
         A dictionary containing a list of ToolMessage objects under the key "tool_responses".
@@ -195,7 +196,8 @@ def generate_context(ai_message: AIMessage, conversation: list) -> dict:
         # a message with tool calls is expected to be followed by tool responses
         for tool_call in ai_message.tool_calls:
             if tool_call["name"] == "SmartphoneInfo":
-                tool_output = smartphone_info_tool.invoke(tool_call)
+                # Pass config with callbacks to ensure tool invocation is traced
+                tool_output = smartphone_info_tool.invoke(tool_call, config=config)
                 conversation.append(tool_output)
 
     except Exception as e:
@@ -369,7 +371,12 @@ def main():
                     )
 
                     # Process tool calls and add results to in-memory conversation
-                    generate_context(ai_with_tools, conversation)
+                    # Pass config with callbacks to ensure tool invocations are traced
+                    generate_context(
+                        ai_with_tools,
+                        conversation,
+                        config={"callbacks": [langfuse_handler]}
+                    )
 
                     # Final response chain invocation
                     response = review_chain.invoke(
