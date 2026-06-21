@@ -48,7 +48,7 @@ This project uses [uv](https://docs.astral.sh/uv/) for Python package management
 1. Clone the repository:
    ```bash
    git clone <repository-url>
-   cd AI-Engineer-Deploy
+   cd AI-Engineer-Deploy/starter_code
    ```
 
 2. Install dependencies using `uv`:
@@ -138,24 +138,27 @@ Here are the main directories and files in this repo:
 
 ```markdown
 ├── images
-│   ├── AWS.png
-│   ├── langfuse.png
-│   ├── litellm.png
-│   ├── qdrant.png
-│   ├── redis.png
-│   └── UI.png
+│   ├── AWS.png
+│   ├── langfuse.png
+│   ├── litellm.png
+│   ├── qdrant.png
+│   ├── redis.png
+│   └── UI.png
 ├── starter_code
-│   ├── config
-│   │   ├── config.yml
-│   │   └── prompts.yml
-│   ├── main.py
-│   ├── requirements.txt
-│   └── smartphones.json
+│   ├── config
+│   │   ├── config.yml
+│   │   └── prompts.yml
+│   ├── datasets
+│   │   └── smartphones.json
+│   ├── .env.sample
+│   ├── main.py
+│   ├── pyproject.toml
+│   └── uv.lock
 ├── tasks
-│   ├── task_1.md
-│   ├── task_2.md
-│   ├── task_3.md
-│   └── task_4.md
+│   ├── task_1.md
+│   ├── task_2.md
+│   ├── task_3.md
+│   └── task_4.md
 ├── CONTRIBUTING.md
 └── README.md
 ```
