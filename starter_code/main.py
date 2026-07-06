@@ -6,7 +6,7 @@ import uuid
 
 import dotenv
 from langchain_core.documents import Document
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage, trim_messages
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, trim_messages
 from langchain_core.prompts import MessagesPlaceholder, ChatPromptTemplate, PromptTemplate
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -18,6 +18,7 @@ from langfuse import observe, propagate_attributes, get_client
 from langfuse.langchain import CallbackHandler
 from nemoguardrails import RailsConfig
 from nemoguardrails.integrations.langchain.runnable_rails import RunnableRails
+from nemoguardrails.rails.llm.options import GenerationOptions
 
 # Load environment variables from .env file
 dotenv.load_dotenv()
@@ -54,15 +55,15 @@ langfuse = get_client()
 # ---------------------------
 
 @observe(name="embed_documents")
-def embed_documents(json_path: str):
+def embed_documents(json_path: str) -> QdrantVectorStore | list:
     """
     Load JSON data from the smartphones.json file and convert each entry to a Document.
     :param
         json_path (str): Path to the JSON file containing smartphone data.
 
     :returns
-        Qdrant vector store A Qdrant vector store built from the smartphone documents,
-                or an empty list if an error occurs.
+        QdrantVectorStore | list: A Qdrant vector store built from the smartphone documents,
+            or an empty list if an error occurs.
     """
     try:
         with open(json_path, "r") as f:
@@ -168,17 +169,18 @@ def smartphone_info_tool(model: str) -> str:
 # Tool Call Handling and Response Generation
 # ---------------------------
 @observe(name="generate_context")
-def generate_context(ai_message: AIMessage, conversation: list, config: dict = None) -> dict:
+def generate_context(ai_message: AIMessage, conversation: list, config: dict | None = None) -> None:
     """
-    Process tool calls from the language model and collect their responses as ToolMessage objects.
+    Process tool calls from the language model and append their responses as ToolMessage objects
+    to the conversation history in place.
 
     :param
         ai_message (AIMessage): The language model's output message containing tool_calls.
         conversation (list): The current conversation history (in-memory for this turn).
-        config (dict): Optional configuration dictionary containing callbacks for tracing.
+        config (dict | None): Optional configuration dictionary containing callbacks for tracing.
 
     :returns
-        A dictionary containing a list of ToolMessage objects under the key "tool_responses".
+        None. The conversation list is updated in place.
     """
     # construct the conversation history with the AI message containing tool calls
     conversation.append(ai_message)
@@ -238,9 +240,10 @@ def main():
     ])
     review_prompt.metadata = {"langfuse_prompt": review_lf_prompt}
 
-    # For goodbye_prompt, extract the content from the first message
+    # goodbye_system_prompt is a text-type Langfuse prompt, so
+    # get_langchain_prompt() returns the template string directly (not a list of messages)
     goodbye_prompt = PromptTemplate.from_template(
-        goodbye_lf_prompt.get_langchain_prompt()[0][1]
+        goodbye_lf_prompt.get_langchain_prompt()
     )
     goodbye_prompt.metadata = {"langfuse_prompt": goodbye_lf_prompt}
 
@@ -285,7 +288,7 @@ def main():
                 with langfuse.start_as_current_observation(
                     as_type="span",
                     name="user-query",
-                    input={"user_input": user_input}
+                    input=user_input
                 ) as span:
                     with propagate_attributes(
                         session_id=session_id,
@@ -300,7 +303,7 @@ def main():
                         )
 
                         # Set the output on the parent span
-                        span.update(output={"response": goodbye_message.content})
+                        span.update(output=goodbye_message.content)
 
                 print(f"System: {goodbye_message.content}")
 
@@ -332,35 +335,37 @@ def main():
             with langfuse.start_as_current_observation(
                 as_type="span",
                 name="user-query",
-                input={"user_input": user_input}
+                input=user_input
             ) as span:
                 # Propagate trace attributes to all child observations
                 with propagate_attributes(
                     session_id=session_id,
                     user_id=user_id
                 ):
-                    # First, validate input with guardrails (only passes user_input, not conversation)
-                    validation_result = input_rails.invoke(
-                        {"user_input": user_input},
-                        config={
-                            "run_name": "input-validation",
-                            "callbacks": [langfuse_handler]
-                        }
-                    )
 
-                    # Check if input rail was triggered
-                    # NeMo Guardrails adds metadata to the AIMessage when a rail is triggered
-                    rail_triggered = isinstance(validation_result, AIMessage) and validation_result.response_metadata.get("rails_triggered", False)
+                    validation_result = input_rails.rails.generate(
+                        messages=[{"role": "user", "content": user_input}],
+                        options=GenerationOptions(
+                        rails=["input"],
+                        output_vars=["allowed", "triggered_input_rail", "bot_message"],
+                         ),
+                        )
+
+                    validation_context = validation_result.output_data or {}
+                    rail_triggered = validation_context.get("allowed") is False or bool(
+                            validation_context.get("triggered_input_rail")
+)
 
                     if rail_triggered:
                         # Rail triggered - skip further processing
-                        print(f"[NeMo Guardrails] Input BLOCKED: {validation_result.content}")
-                        span.update(output={"response": validation_result.content, "rail_triggered": True})
-                        print(f"System: {validation_result.content}")
+                        rail_response = validation_result.response[0]["content"]
+                        span.update(
+                            output=rail_response,
+                            metadata={"triggered_input_rail": validation_context.get("triggered_input_rail")},
+                        )
+                        print(f"System: {rail_response}")
                         continue  # Skip saving to Redis and proceed to next input
 
-                    # Rail not triggered - continue with normal processing
-                    print(f"[NeMo Guardrails] Input ALLOWED: Validation passed")
                     # Context chain invocation (with trimmer to limit tokens)
                     ai_with_tools = context_chain.invoke(
                         {"user_input": user_input, "conversation": conversation},
@@ -388,7 +393,7 @@ def main():
                     )
 
                 # Set the output on the parent span
-                span.update(output={"response": response.content})
+                span.update(output=response.content)
 
             print(f"System: {response.content}")
 
