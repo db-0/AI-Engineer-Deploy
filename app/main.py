@@ -20,7 +20,7 @@ from nemoguardrails import RailsConfig
 from nemoguardrails.integrations.langchain.runnable_rails import RunnableRails
 from nemoguardrails.rails.llm.options import GenerationOptions
 from pydantic import BaseModel
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from logging import getLogger
 
 
@@ -222,58 +222,62 @@ def generate_context(ai_message: AIMessage, conversation: list, config: dict | N
         )
 
 
+# ---------------------------------
+# Initialize tooling for requests
+# ---------------------------------
+# List of available tools
+tools = [smartphone_info_tool]
+
+# Bind the tools to the language model instance
+llm_with_tools = llm.bind_tools(tools)
+
+# Fetch prompts from Langfuse
+context_lf_prompt = langfuse.get_prompt("context_system_prompt")
+review_lf_prompt = langfuse.get_prompt("review_system_prompt")
+
+# Create LangChain prompts from Langfuse prompts
+# Extract the first message (system message) and add MessagesPlaceholder for conversation history
+context_prompt = ChatPromptTemplate.from_messages([
+    context_lf_prompt.get_langchain_prompt()[0],
+    MessagesPlaceholder(variable_name="conversation"),
+])
+context_prompt.metadata = {"langfuse_prompt": context_lf_prompt}
+
+review_prompt = ChatPromptTemplate.from_messages([
+    review_lf_prompt.get_langchain_prompt()[0],
+    MessagesPlaceholder(variable_name="conversation"),
+])
+review_prompt.metadata = {"langfuse_prompt": review_lf_prompt}
+
+# Create message trimmer for context chain to limit token usage
+trimmer = trim_messages(
+    strategy="last",  # Keep the most recent messages
+    token_counter=llm,  # Use LLM to count tokens
+    max_tokens=500,  # Maximum tokens for conversation history
+    start_on="human",  # Start trimmed history with a human message
+    end_on=("human", "tool"),  # End on human or tool message
+    include_system=True,  # Always include system message
+)
+
+# Build chains (trimmer only on context_chain to manage tool call context)
+context_chain = context_prompt | trimmer | llm_with_tools
+review_chain = review_prompt | llm
+
+# Load NeMo Guardrails configuration
+guardrails_config = RailsConfig.from_path("config/")
+
+# Create guardrails instance for input validation only
+# We'll use it separately to validate user input before the chain
+input_rails = RunnableRails(guardrails_config, input_key="user_input")
+
+# Initialize the Langfuse handler once for the entire conversation
+langfuse_handler = CallbackHandler()
+
+
 # ---------------------------
 # Process /ask request
 # ---------------------------
 def process_ask(request: QueryRequest):
-    # List of available tools
-    tools = [smartphone_info_tool]
-
-    # Bind the tools to the language model instance
-    llm_with_tools = llm.bind_tools(tools)
-
-    # Fetch prompts from Langfuse
-    context_lf_prompt = langfuse.get_prompt("context_system_prompt")
-    review_lf_prompt = langfuse.get_prompt("review_system_prompt")
-
-    # Create LangChain prompts from Langfuse prompts
-    # Extract the first message (system message) and add MessagesPlaceholder for conversation history
-    context_prompt = ChatPromptTemplate.from_messages([
-        context_lf_prompt.get_langchain_prompt()[0],
-        MessagesPlaceholder(variable_name="conversation"),
-    ])
-    context_prompt.metadata = {"langfuse_prompt": context_lf_prompt}
-
-    review_prompt = ChatPromptTemplate.from_messages([
-        review_lf_prompt.get_langchain_prompt()[0],
-        MessagesPlaceholder(variable_name="conversation"),
-    ])
-    review_prompt.metadata = {"langfuse_prompt": review_lf_prompt}
-
-    # Create message trimmer for context chain to limit token usage
-    trimmer = trim_messages(
-        strategy="last",  # Keep the most recent messages
-        token_counter=llm,  # Use LLM to count tokens
-        max_tokens=500,  # Maximum tokens for conversation history
-        start_on="human",  # Start trimmed history with a human message
-        end_on=("human", "tool"),  # End on human or tool message
-        include_system=True,  # Always include system message
-    )
-
-    # Build chains (trimmer only on context_chain to manage tool call context)
-    context_chain = context_prompt | trimmer | llm_with_tools
-    review_chain = review_prompt | llm
-
-    # Load NeMo Guardrails configuration
-    guardrails_config = RailsConfig.from_path("config/")
-
-    # Create guardrails instance for input validation only
-    # We'll use it separately to validate user input before the chain
-    input_rails = RunnableRails(guardrails_config, input_key="user_input")
-
-    # Initialize the Langfuse handler once for the entire conversation
-    langfuse_handler = CallbackHandler()
-
     # Initialize Redis chat history with TTL (1 hour = 3600 seconds)
     redis_history = RedisChatMessageHistory(
         session_id=request.session_id,
@@ -363,8 +367,16 @@ def process_ask(request: QueryRequest):
         return result
 
     except Exception as e:
-        logger.error(f"An unexpected error occurred in the main loop: {e}")
-        sys.exit(1)
+        logger.exception(
+            "Unexpected error in main loop",
+            extra={
+                "user_id": request.user_id,
+                "session_id": request.session_id,
+                "user_input": request.user_input,
+                "operation": "/ask"
+            },
+        )
+        raise HTTPException(500, "An unexpected error occurred") from e
 
 
 # ----------------------
