@@ -55,7 +55,7 @@ embeddings_model = OpenAIEmbeddings(
 )
 
 # Redis configuration
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6380/0")
+REDIS_URL = os.getenv("REDIS_CONNECTION_STRING")
 
 # Initialize Langfuse client
 langfuse = get_client()
