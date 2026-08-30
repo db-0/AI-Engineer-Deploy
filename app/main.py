@@ -31,7 +31,7 @@ dotenv.load_dotenv()
 logger = getLogger("app")
 
 # Initialize FastAPI
-app = FastAPI(title="Smartphone Assistant")
+app = FastAPI(title="Hypersite: Smartphone Assistant")
 
 # QueryRequest model for input to /ask endpoint
 class QueryRequest(BaseModel):
